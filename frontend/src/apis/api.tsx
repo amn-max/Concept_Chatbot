@@ -59,7 +59,7 @@ export interface QueryResponse {
 export const getAnswer = async (inputQuery: string) => {
   const inputData = { query: inputQuery };
   const result = await axios.post(`${uploadUrl}/query`, inputData);
-
+  console.log(result.data.response);
   const data = {
     response: result.data.response.message || result.data.response,
     relevantDocs: result.data.relevant_docs,

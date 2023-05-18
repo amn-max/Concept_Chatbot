@@ -5,6 +5,7 @@ from langchain.document_loaders import TextLoader
 from langchain.embeddings import HuggingFaceEmbeddings
 from langchain.document_loaders import TextLoader, UnstructuredFileLoader,PDFMinerLoader
 from langchain.chains.question_answering import load_qa_chain
+from langchain.chains.summarize import load_summarize_chain
 from langchain.chains.qa_with_sources import load_qa_with_sources_chain
 from langchain.llms import OpenAI,LlamaCpp
 from qdrant_client import QdrantClient
@@ -18,7 +19,9 @@ from chat_sonic import ChatSonic
 import uuid
 import logging
 from langchain import PromptTemplate
+from langchain.memory import ConversationEntityMemory
 from transformers import AutoModelForQuestionAnswering, AutoTokenizer, pipeline
+from langchain import PromptTemplate
 model_name = 'deepset/roberta-base-squad2'
 logging.basicConfig(level=logging.INFO, format='=========== %(asctime)s :: %(levelname)s :: %(message)s')
 
@@ -28,7 +31,25 @@ COLLECTION_NAME = 'qa_collection'
 embedding_model = SentenceTransformer('sentence-transformers/all-mpnet-base-v2', device='cpu')
 # embedding_model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
 
-qa_chain = load_qa_chain(llm=OpenAI(model_name='text-davinci-003',openai_api_key=settings.openai_api_key, streaming=False), chain_type="stuff", verbose=False)
+
+
+template = '''Given the following extracted parts of a long document, Answer the question and provide more reasoning and justification 
+to answer in layman terms.
+If you don't know the answer, just say that you don't know. Don't try to make up an answer.
+
+{context}
+
+QUESTION: {question}
+=========
+
+Answer:'''
+
+prompt = PromptTemplate(
+    template=template, input_variables=["context", "question"]
+)
+llm = OpenAI(model_name='text-davinci-003',openai_api_key=settings.openai_api_key,max_tokens=2000, streaming=False)
+# memory = ConversationEntityMemory(llm=llm)
+qa_chain = load_qa_chain(prompt=prompt,llm=llm, chain_type="stuff", verbose=True)
 # qa_chain = load_qa_chain(llm=LlamaCpp(model_path="../../../../poc/ggml-vic7b-q5_1.bin",n_ctx=2048, streaming=False), chain_type="stuff", verbose=False)
 # answerer = pipeline(model = model_name, task="question-answering")
 chat_sonic = ChatSonic()
@@ -49,10 +70,10 @@ class QdrantIndex():
         self.embedding_model =  embedding_model
         self.embedding_size = self.embedding_model.get_sentence_embedding_dimension()
         self.collection_name = COLLECTION_NAME
-        self.qdrant_client.recreate_collection(
-            collection_name=self.collection_name,
-            vectors_config=VectorParams(size=self.embedding_size, distance=Distance.COSINE),
-        )
+        # self.qdrant_client.recreate_collection(
+        #     collection_name=self.collection_name,
+        #     vectors_config=VectorParams(size=self.embedding_size, distance=Distance.COSINE),
+        # )
         logging.info(f"Collection {COLLECTION_NAME} is successfully created.")
         
     
@@ -93,7 +114,8 @@ class QdrantIndex():
         logging.info("Index update successfully done!")
         
     def generate_response_gpt(self, question: str):
-        relevant_docs = self.similarity_search_with_score(query=question,k=10)
+        relevant_docs = self.similarity_search_with_score(query=question,k=5)
+        print(relevant_docs)
         return (qa_chain.run(input_documents=relevant_docs, question=question), relevant_docs)
     
     def generate_response_chat_sonic(self, question: str):
