@@ -3,11 +3,15 @@ from langchain.docstore.document import Document
 from langchain.vectorstores import Qdrant
 from langchain.document_loaders import TextLoader
 from langchain.embeddings import HuggingFaceEmbeddings
-from langchain.document_loaders import TextLoader, UnstructuredFileLoader,PDFMinerLoader
+from langchain.document_loaders import (
+    TextLoader,
+    UnstructuredFileLoader,
+    PDFMinerLoader,
+)
 from langchain.chains.question_answering import load_qa_chain
 from langchain.chains.summarize import load_summarize_chain
 from langchain.chains.qa_with_sources import load_qa_with_sources_chain
-from langchain.llms import OpenAI,LlamaCpp
+from langchain.llms import OpenAI, LlamaCpp
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, VectorParams
 from qdrant_client.http.models import Filter
@@ -22,52 +26,108 @@ from langchain import PromptTemplate
 from langchain.memory import ConversationEntityMemory
 from transformers import AutoModelForQuestionAnswering, AutoTokenizer, pipeline
 from langchain import PromptTemplate
-model_name = 'deepset/roberta-base-squad2'
-logging.basicConfig(level=logging.INFO, format='=========== %(asctime)s :: %(levelname)s :: %(message)s')
+from langchain.prompts.example_selector import SemanticSimilarityExampleSelector
+from langchain.vectorstores import Chroma
+from langchain.embeddings.huggingface import HuggingFaceEmbeddings
+from examples import examples
+from langchain import FewShotPromptTemplate
+import chromadb
+from chromadb.utils import embedding_functions
+import uuid
+
+sentence_transformer_ef = embedding_functions.SentenceTransformerEmbeddingFunction(
+    model_name="all-mpnet-base-v2"
+)
+chroma_client = chromadb.Client()
+model_name = "deepset/roberta-base-squad2"
+logging.basicConfig(
+    level=logging.INFO, format="=========== %(asctime)s :: %(levelname)s :: %(message)s"
+)
 
 MetadataFilter = Dict[str, Union[str, int, bool]]
-COLLECTION_NAME = 'qa_collection'
+COLLECTION_NAME = "qa_collection"
 
-embedding_model = SentenceTransformer('sentence-transformers/all-mpnet-base-v2', device='cpu')
+embedding_model = SentenceTransformer(
+    "sentence-transformers/all-mpnet-base-v2", device="cpu"
+)
 # embedding_model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
+embedding_model_class = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-mpnet-base-v2"
+)
+example_selector = SemanticSimilarityExampleSelector.from_examples(
+    # This is the list of examples available to select from.
+    examples,
+    # This is the embedding class used to produce embeddings which are used to measure semantic similarity.
+    embedding_model_class,
+    # This is the VectorStore class that is used to store the embeddings and do a similarity search over.
+    Chroma,
+    # This is the number of examples to produce.
+    k=1,
+)
 
+# now break our previous prompt into a prefix and suffix
+# the prefix is our instructions
+prefix = """The following are exerpts from Question Answers session with an AI
+assistant. Mimic the response if possible. Do not include important confidential point from example
+question and answer to actual question answer. You do not need to use these pieces of examples if not relevant
+Here are some examples: 
+"""
 
+example_template = """
+Example Question: {question}
+Example Answer: {answer}
+"""
 
-template = '''Given the following extracted parts of a long document, Answer the question and provide more reasoning and justification 
+# and the suffix our user input and output indicator
+suffix = """
+Relevant pieces of previous conversation:
+{history}
+=========
+
+Given the following extracted parts of a long document, Answer the question and provide more reasoning and justification 
 to answer in layman terms.
 If you don't know the answer, just say that you don't know. Don't try to make up an answer.
 
-{context}
+Cotext: {context}
 
-QUESTION: {question}
+Actual Question based on above context: {question}
 =========
 
-Answer:'''
+Actual Answer based on above context:"""
 
-prompt = PromptTemplate(
-    template=template, input_variables=["context", "question"]
+
+example_prompt = PromptTemplate(
+    input_variables=["question", "answer"], template=example_template
 )
-llm = OpenAI(model_name='text-davinci-003',openai_api_key=settings.openai_api_key,max_tokens=2000, streaming=False)
+
+llm = OpenAI(
+    model_name="gpt-3.5-turbo-0301",
+    openai_api_key=settings.openai_api_key,
+    max_tokens=2000,
+    streaming=False,
+)
 # memory = ConversationEntityMemory(llm=llm)
-qa_chain = load_qa_chain(prompt=prompt,llm=llm, chain_type="stuff", verbose=True)
+
 # qa_chain = load_qa_chain(llm=LlamaCpp(model_path="../../../../poc/ggml-vic7b-q5_1.bin",n_ctx=2048, streaming=False), chain_type="stuff", verbose=False)
 # answerer = pipeline(model = model_name, task="question-answering")
-chat_sonic = ChatSonic()
+# chat_sonic = ChatSonic()
 
-class QdrantIndex():
+collection = chroma_client.create_collection(
+    name="my_collection", embedding_function=sentence_transformer_ef
+)
 
+
+class QdrantIndex:
     def __init__(self, qdrant_host: str, qdrant_api_key: str, prefer_grpc: bool):
-        if qdrant_host == 'localhost':
+        if qdrant_host == "localhost":
             self.qdrant_client = QdrantClient(
                 url="http://localhost:6333",
             )
         else:
             self.qdrant_client = QdrantClient(
-                host=qdrant_host, 
-                prefer_grpc=prefer_grpc,
-                api_key=qdrant_api_key
+                host=qdrant_host, prefer_grpc=prefer_grpc, api_key=qdrant_api_key
             )
-        self.embedding_model =  embedding_model
+        self.embedding_model = embedding_model
         self.embedding_size = self.embedding_model.get_sentence_embedding_dimension()
         self.collection_name = COLLECTION_NAME
         # self.qdrant_client.recreate_collection(
@@ -75,12 +135,20 @@ class QdrantIndex():
         #     vectors_config=VectorParams(size=self.embedding_size, distance=Distance.COSINE),
         # )
         logging.info(f"Collection {COLLECTION_NAME} is successfully created.")
-        
-    
 
-    
+    def create_dynamic_template(self, selected_examples):
+        few_shot_prompt_template = FewShotPromptTemplate(
+            examples=selected_examples,
+            example_prompt=example_prompt,
+            prefix=prefix,
+            suffix=suffix,
+            input_variables=["context", "question", "history"],
+            example_separator="\n\n",
+        )
+        return few_shot_prompt_template
+
     def insert_into_index(self, filepath: str, filename: str):
-        """ Adds new documents into the index
+        """Adds new documents into the index
 
         Args:
             filepath (str): full path of the pdf file
@@ -95,29 +163,44 @@ class QdrantIndex():
         metadatas = [doc.metadata for doc in documents]
         print(texts)
         ids = [uuid.uuid4().hex for _ in texts]
-        vectors = self.embedding_model.encode(texts, show_progress_bar=False, batch_size=128).tolist()
+        vectors = self.embedding_model.encode(
+            texts, show_progress_bar=False, batch_size=128
+        ).tolist()
         payloads = self.build_payloads(
-                    texts,
-                    metadatas,
-                    'page_content',
-                    'metadata',
-                )
+            texts,
+            metadatas,
+            "page_content",
+            "metadata",
+        )
         # Upload points in bactches
         self.qdrant_client.upsert(
             collection_name=COLLECTION_NAME,
-            points=rest.Batch(
-                ids=ids,
-                vectors=vectors,
-                payloads=payloads
-            ),
+            points=rest.Batch(ids=ids, vectors=vectors, payloads=payloads),
         )
         logging.info("Index update successfully done!")
-        
+
     def generate_response_gpt(self, question: str):
-        relevant_docs = self.similarity_search_with_score(query=question,k=5)
-        print(relevant_docs)
-        return (qa_chain.run(input_documents=relevant_docs, question=question), relevant_docs)
-    
+        relevant_docs = self.similarity_search_with_score(query=question, k=5)
+        selected_examples = example_selector.select_examples({"question": question})
+        prompt = self.create_dynamic_template(selected_examples)
+
+        collection.add(
+            documents=[doc.page_content for doc in relevant_docs],
+            ids=[str(uuid.uuid4()) for _ in range(5)],
+        )
+        history_results = collection.query(query_texts=[question], n_results=1)
+        qa_chain = load_qa_chain(
+            prompt=prompt, llm=llm, chain_type="stuff", verbose=True
+        )
+        return (
+            qa_chain.run(
+                input_documents=relevant_docs,
+                question=question,
+                history=history_results,
+            ),
+            relevant_docs,
+        )
+
     def generate_response_chat_sonic(self, question: str):
         # template = """Answer the question based on the context below. If the
         #     question cannot be answered using the information provided answer
@@ -128,36 +211,39 @@ class QdrantIndex():
         #     Question: {query}
 
         #     Answer: """
-        
-        
+
         # prompt_template = PromptTemplate(
         #     input_variables=["context","query"],
         #     template=template
         # )
-        
-        relevant_docs = self.similarity_search_with_score_for_chat_sonic(query=question,k=3)
+
+        relevant_docs = self.similarity_search_with_score_for_chat_sonic(
+            query=question, k=3
+        )
         # prompt = prompt_template.format({
         #     'context':relevant_docs,
         #     'query':question
         # })
-        joined_content = ''.join(doc for doc in relevant_docs)
-        
+        joined_content = "".join(doc for doc in relevant_docs)
+
         template = """
         Below is the context provided for the document. Answer the question based on it.
         Document: {context}.
 
         Question: {query}
 
-        Answer: """.format(context = joined_content,query=question)
+        Answer: """.format(
+            context=joined_content, query=question
+        )
         print(template)
-        return (chat_sonic.run(question=template),relevant_docs)
+        return (chat_sonic.run(question=template), relevant_docs)
         # return (answerer(context=joined_content, question=question), relevant_docs)
         # return (qa_chain.run(input_documents=relevant_docs, question=question), relevant_docs)
         # return relevant_docs
-    
-    
-    # Adopted from lanchain github            
-    def build_payloads(self,
+
+    # Adopted from lanchain github
+    def build_payloads(
+        self,
         texts: Iterable[str],
         metadatas: Optional[List[dict]],
         content_payload_key: str,
@@ -179,7 +265,7 @@ class QdrantIndex():
             )
 
         return payloads
-    
+
     # Adopted from lanchain github
     def similarity_search_with_score(
         self, query: str, k: int = 5, filter: Optional[MetadataFilter] = None
@@ -205,13 +291,14 @@ class QdrantIndex():
             print()
         return [
             Document(
-                 page_content=result.payload['page_content'],
-                 metadata=result.payload['metadata']
+                page_content=result.payload["page_content"],
+                metadata=result.payload["metadata"],
             )
             for result in results
         ]
-        
+
         # Adopted from lanchain github
+
     def similarity_search_with_score_for_chat_sonic(
         self, query: str, k: int = 5, filter: Optional[MetadataFilter] = None
     ) -> List[Tuple[Document, float]]:
@@ -234,18 +321,4 @@ class QdrantIndex():
         for r in results:
             print(r)
             print()
-        return [
-            result.payload['page_content']
-            for result in results
-        ]
-
-
-
-
-
-
-
-
-
-
-
+        return [result.payload["page_content"] for result in results]
