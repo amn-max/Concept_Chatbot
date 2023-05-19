@@ -35,10 +35,10 @@ import chromadb
 from chromadb.utils import embedding_functions
 import uuid
 
-sentence_transformer_ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-    model_name="all-mpnet-base-v2"
-)
-chroma_client = chromadb.Client()
+# sentence_transformer_ef = embedding_functions.SentenceTransformerEmbeddingFunction(
+#     model_name="all-mpnet-base-v2"
+# )
+# chroma_client = chromadb.Client()
 model_name = "deepset/roberta-base-squad2"
 logging.basicConfig(
     level=logging.INFO, format="=========== %(asctime)s :: %(levelname)s :: %(message)s"
@@ -80,10 +80,6 @@ Example Answer: {answer}
 
 # and the suffix our user input and output indicator
 suffix = """
-Relevant pieces of previous conversation:
-{history}
-=========
-
 Given the following extracted parts of a long document, Answer the question and provide more reasoning and justification 
 to answer in layman terms.
 If you don't know the answer, just say that you don't know. Don't try to make up an answer.
@@ -112,9 +108,9 @@ llm = OpenAI(
 # answerer = pipeline(model = model_name, task="question-answering")
 # chat_sonic = ChatSonic()
 
-collection = chroma_client.create_collection(
-    name="my_collection", embedding_function=sentence_transformer_ef
-)
+# collection = chroma_client.create_collection(
+#     name="my_collection", embedding_function=sentence_transformer_ef
+# )
 
 
 class QdrantIndex:
@@ -142,7 +138,7 @@ class QdrantIndex:
             example_prompt=example_prompt,
             prefix=prefix,
             suffix=suffix,
-            input_variables=["context", "question", "history"],
+            input_variables=["context", "question"],
             example_separator="\n\n",
         )
         return few_shot_prompt_template
@@ -183,12 +179,6 @@ class QdrantIndex:
         relevant_docs = self.similarity_search_with_score(query=question, k=5)
         selected_examples = example_selector.select_examples({"question": question})
         prompt = self.create_dynamic_template(selected_examples)
-
-        collection.add(
-            documents=[doc.page_content for doc in relevant_docs],
-            ids=[str(uuid.uuid4()) for _ in range(5)],
-        )
-        history_results = collection.query(query_texts=[question], n_results=1)
         qa_chain = load_qa_chain(
             prompt=prompt, llm=llm, chain_type="stuff", verbose=True
         )
@@ -196,7 +186,6 @@ class QdrantIndex:
             qa_chain.run(
                 input_documents=relevant_docs,
                 question=question,
-                history=history_results,
             ),
             relevant_docs,
         )
